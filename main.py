@@ -1,17 +1,20 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import pandas as pd
 import numpy as np
 import joblib
 from tensorflow.keras.models import load_model
+import os
+
+# Suppress TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 app = FastAPI()
 
-# Load model and scaler at startup
+# Load models at startup
 autoencoder = load_model("autoencoder_model.h5", compile=False)
 autoencoder.compile(optimizer='adam', loss='mean_squared_error')
 scaler = joblib.load("scaler.pkl")
-THRESHOLD = 0.01  # Your empirical threshold
+THRESHOLD = 0.01
 
 
 class InputSample(BaseModel):
@@ -27,29 +30,34 @@ class PredictionResult(BaseModel):
     classification: str
 
 
-@app.post("/detect-anomaly/", response_model=list[PredictionResult])
-async def detect_anomaly(samples: list[InputSample]):
-    # Convert input to DataFrame
-    input_data = pd.DataFrame([s.dict() for s in samples])
+@app.post("/detect-anomaly/")
+def detect_anomaly(input: InputSample):
+    # Convert input to numpy array directly (no pandas)
+    X = np.array([[
+        input.typing_speed,
+        input.tap_pressure,
+        input.swipe_velocity,
+        input.gesture_duration,
+        input.orientation_variance
+    ]])
 
-    # Preprocess input
-    scaled_input = scaler.transform(input_data)
-
-    # Make prediction
+    # Scale and predict
+    scaled_input = scaler.transform(X)
     reconstructed = autoencoder.predict(scaled_input)
-    reconstruction_error = np.mean((scaled_input - reconstructed) ** 2, axis=1)
+    error = np.mean((scaled_input - reconstructed) ** 2)
 
-    # Prepare results
-    results = []
-    for error in reconstruction_error:
-        results.append(PredictionResult(
-            reconstruction_error=float(error),
-            classification="Anomaly" if error > THRESHOLD else "Normal"
-        ))
-
-    return results
+    return PredictionResult(
+        reconstruction_error=float(error),
+        classification="Anomaly" if error > THRESHOLD else "Normal"
+    )
 
 
 @app.get("/")
 def health_check():
-    return {"status": "active", "message": "Anomaly detection API is running"}
+    return {"status": "active", "model_loaded": True}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
